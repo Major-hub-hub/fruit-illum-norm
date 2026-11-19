@@ -89,6 +89,8 @@ class FruitDataset(Dataset):
 
 
 def main():
+    import matplotlib
+    matplotlib.use("Agg")  # The CLI saves a PNG and does not need a GUI backend.
     import matplotlib.pyplot as plt
 
     parser = argparse.ArgumentParser(description=__doc__)

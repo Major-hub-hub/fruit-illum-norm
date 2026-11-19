@@ -1,21 +1,21 @@
-name: fruit-illum-norm
+name: fruit-split
 channels:
-  - pytorch
-  - conda-forge
+  - defaults
 dependencies:
   - python=3.11
-  - numpy
-  - pytorch
-  - torchvision
-  - cpuonly
-  - opencv
-  - pillow
+  - numpy=2.4.6
+  - pandas=3.1.0
+  - "pytorch=2.11.*=cpu*"
+  - "torchvision=0.26.*=cpu*"
+  - opencv=4.13.*
+  - pillow=12.2.*
   - scikit-learn
-  - pandas
-  - matplotlib
+  - matplotlib-base
   - tqdm
   - pyyaml
   - jupyter
   - ipykernel
+  - nbformat
+  - nbclient
   - pip
 
