@@ -1,0 +1,21 @@
+name: fruit-illum-norm
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - pytorch
+  - torchvision
+  - cpuonly
+  - opencv
+  - pillow
+  - scikit-learn
+  - pandas
+  - matplotlib
+  - tqdm
+  - pyyaml
+  - jupyter
+  - ipykernel
+  - pip
+
