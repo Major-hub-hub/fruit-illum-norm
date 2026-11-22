@@ -3,6 +3,7 @@
 Examples (run from repository root):
   python -m src.train --condition B0 --epochs 1 --batch-size 4 --max-batches 2 --wandb-mode disabled
   python -m src.train --condition B0 --seed 42 --epochs 30 --batch-size 16 --wandb-mode online
+  python -m src.train --condition B0 --stage 2 --seed 42 --epochs 40 --lr 1e-5 --wandb-mode online
 """
 
 import argparse
@@ -54,14 +55,14 @@ def run_epoch(model, loader, criterion, device, *, optimizer=None,
     training = optimizer is not None
     model.train(training)
     if training and frozen_backbone:
-        # Do not update running means/variances of pretrained BatchNorm layers.
+        # Keep pretrained BatchNorm running statistics fixed in both stages.
         for layer in model.modules():
             if isinstance(layer, nn.BatchNorm2d):
                 layer.eval()
 
     total_loss = total_correct = total_samples = 0
     batches = min(len(loader), max_batches) if max_batches else len(loader)
-    progress = tqdm(loader, total=len(loader), desc=desc, leave=False)
+    progress = tqdm(loader, total=batches, desc=desc, leave=False)
 
     with torch.set_grad_enabled(training):
         for batch_idx, (images, labels) in enumerate(progress):
@@ -113,25 +114,67 @@ def train(args) -> None:
     print(f"Training samples: {len(train_loader.dataset)} | "
           f"Validation samples: {len(val_loader.dataset)}", flush=True)
 
-    # Prefer the local pretrained model builder created earlier in this project.
-    model = build_model(pretrained=True, freeze_backbone=True).to(device)
-    # Freeze all backbone weights, but train the new binary classification head.
-    for name, param in model.named_parameters():
-        param.requires_grad = name.startswith("fc.")
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable parameters: {trainable}")
-
-    criterion = nn.CrossEntropyLoss()  # Two logits, integer targets 0/1
-    optimizer = torch.optim.Adam(
-        (p for p in model.parameters() if p.requires_grad), lr=args.lr
-    )
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     METRICS_DIR.mkdir(parents=True, exist_ok=True)
     run_name = f"{args.condition}_seed{args.seed}"
+    if args.stage == 2:
+        run_name += "_stage2"
     if args.max_batches:
         run_name = f"smoke_{run_name}"
     checkpoint_path = CHECKPOINT_DIR / f"{run_name}_best.pth"
     history_path = METRICS_DIR / f"{run_name}_history.csv"
+
+    if args.stage == 1:
+        # Local V1 weights, frozen backbone, new two-class head.
+        model = build_model(pretrained=True, freeze_backbone=True)
+        for name, param in model.named_parameters():
+            param.requires_grad = name.startswith("fc.")
+        optimizer_name = "Adam"
+        optimizer_type = torch.optim.Adam
+        stage_name = "frozen_backbone"
+        source_path = None
+    else:
+        # Always load stage 1's full, best validation checkpoint. Do not
+        # silently use the smoke-test checkpoint or original ImageNet weights.
+        source_path = (Path(args.stage1_checkpoint).resolve()
+                       if args.stage1_checkpoint
+                       else CHECKPOINT_DIR / f"{args.condition}_seed{args.seed}_best.pth")
+        if not source_path.is_file():
+            raise FileNotFoundError(
+                f"Stage 1 checkpoint missing: {source_path}\n"
+                "Finish full Stage 1 first; Stage 2 cannot start from ImageNet alone."
+            )
+        previous = torch.load(source_path, map_location="cpu", weights_only=True)
+        if previous.get("condition") != args.condition or previous.get("seed") != args.seed:
+            raise ValueError("Stage 1 checkpoint condition/seed does not match this run")
+        if previous.get("smoke_test", False) or "smoke_" in source_path.name:
+            raise ValueError("Do not fine-tune from a smoke-test checkpoint")
+        if previous.get("training_stage") != "frozen_backbone":
+            raise ValueError("Stage 2 requires a frozen-backbone Stage 1 checkpoint")
+        if previous.get("weights_source") != "IMAGENET1K_V1":
+            raise ValueError("Stage 1 must use ImageNet V1 pretrained weights")
+
+        # Construct matching two-class architecture without downloading weights.
+        model = build_model(pretrained=False, freeze_backbone=False)
+        model.load_state_dict(previous["model_state_dict"], strict=True)
+
+        # Fine-tune only uppermost residual block and classification head.
+        for name, param in model.named_parameters():
+            param.requires_grad = name.startswith(("layer4.", "fc."))
+        optimizer_name = "RMSprop"
+        optimizer_type = torch.optim.RMSprop
+        stage_name = "fine_tune_layer4"
+        print(f"Loaded Stage 1 checkpoint: {source_path}")
+        print(f"Starting from Stage 1 epoch {previous['epoch']}")
+
+    model = model.to(device)
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Stage: {args.stage} | Trainable parameters: {trainable}", flush=True)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optimizer_type(
+        (p for p in model.parameters() if p.requires_grad), lr=args.lr
+    )
 
     wandb_run = None
     if args.wandb_mode != "disabled":
@@ -140,14 +183,17 @@ def train(args) -> None:
             wandb_run = wandb.init(
                 project=args.wandb_project,
                 name=run_name,
+                group=f"{args.condition}_seed{args.seed}",
                 mode=args.wandb_mode,
                 dir=str(ROOT),
                 config={
                     "condition": args.condition, "seed": args.seed,
                     "architecture": "ResNet50", "weights": "IMAGENET1K_V1",
-                    "classes": ["fresh", "rotten"], "training_stage": "frozen_backbone",
+                    "classes": ["fresh", "rotten"], "training_stage": stage_name,
+                    "stage": args.stage, "unfrozen_layers": "layer4+fc" if args.stage == 2 else "fc",
+                    "source_checkpoint": str(source_path) if source_path else None,
                     "batch_size": args.batch_size, "learning_rate": args.lr,
-                    "optimizer": "Adam", "loss": "CrossEntropyLoss",
+                    "optimizer": optimizer_name, "loss": "CrossEntropyLoss",
                     "epochs": args.epochs, "patience": args.patience,
                     "min_delta": args.min_delta,
                     "train_samples": len(train_loader.dataset),
@@ -203,7 +249,12 @@ def train(args) -> None:
                     "weights_source": "IMAGENET1K_V1",
                     "num_classes": 2,
                     "class_names": ["fresh", "rotten"],
-                    "training_stage": "frozen_backbone",
+                    "training_stage": stage_name,
+                    "stage": args.stage,
+                    "unfrozen_layers": "layer4+fc" if args.stage == 2 else "fc",
+                    "source_checkpoint": str(source_path) if source_path else None,
+                    "optimizer_name": optimizer_name,
+                    "learning_rate": args.lr,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "best_val_loss": best_loss,
@@ -259,9 +310,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--condition", choices=sorted(PIPELINES), default="B0")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--stage", choices=[1, 2], type=int, default=1)
+    parser.add_argument("--stage1-checkpoint", default=None,
+                        help="Optional path to best full Stage 1 checkpoint")
+    parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--patience", type=int, default=4)
     parser.add_argument("--min-delta", type=float, default=1e-4)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -269,6 +323,10 @@ def main() -> None:
     parser.add_argument("--wandb-project", default="fruit-illum-norm")
     parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
     args = parser.parse_args()
+    if args.epochs is None:
+        args.epochs = 40 if args.stage == 2 else 30
+    if args.lr is None:
+        args.lr = 1e-5 if args.stage == 2 else 1e-4
     if args.epochs < 1 or args.batch_size < 1 or args.lr <= 0 or args.patience < 1:
         parser.error("epochs, batch-size, lr, and patience must be positive")
     if args.min_delta < 0 or args.num_workers < 0 or args.max_batches < 0:
