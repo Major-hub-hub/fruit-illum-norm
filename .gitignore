@@ -9,4 +9,9 @@ outputs/figures/*
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
+# Local pretrained ImageNet model weights
+models/pretrained/*.pth
 
+# Experiment checkpoints
+outputs/checkpoints/*
+!outputs/checkpoints/.gitkeep
