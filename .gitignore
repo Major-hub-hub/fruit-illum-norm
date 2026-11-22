@@ -15,3 +15,8 @@ models/pretrained/*.pth
 # Experiment checkpoints
 outputs/checkpoints/*
 !outputs/checkpoints/.gitkeep
+# W&B local metadata and logs
+wandb/
+
+# Local pretrained weights
+models/pretrained/*.pth
