@@ -20,3 +20,4 @@ wandb/
 
 # Local pretrained weights
 models/pretrained/*.pth
+.vscode/

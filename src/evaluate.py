@@ -32,33 +32,20 @@ from tqdm.auto import tqdm
 from src.data.dataset import FruitDataset, ROOT
 from src.models.resnet50_binary import build_model
 from src.preprocess.pipeline import PIPELINES
+from src.preprocess.stress import STRESSES, apply_stress
 
 CLASSES = ["fresh", "rotten"]  # 0=fresh, 1=rotten
-STRESSES = ("normal", "dark", "bright", "warm_cast")
 
 
 @dataclass(frozen=True)
 class TestPreprocessing:
-    """Simulate sensor lighting BEFORE the selected image preprocessing."""
+    """Apply illumination stress before model preprocessing."""
 
     condition: str
     stress: str
 
     def __call__(self, rgb: np.ndarray) -> np.ndarray:
-        if self.stress == "normal":
-            observed = rgb
-        else:
-            observed = rgb.astype(np.float32)
-            if self.stress == "dark":
-                observed *= 0.50
-            elif self.stress == "bright":
-                observed *= 1.40
-            elif self.stress == "warm_cast":
-                # RGB channel multipliers; a deterministic warm illumination cast.
-                observed *= np.array([1.20, 1.00, 0.75], dtype=np.float32)
-            else:
-                raise ValueError(f"Unknown stress condition: {self.stress}")
-            observed = np.clip(observed, 0, 255).astype(np.uint8)
+        observed = apply_stress(rgb, self.stress)
         return PIPELINES[self.condition](observed)
 
 
